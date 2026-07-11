@@ -1,0 +1,92 @@
+@startuml AdScale_TO_BE_C4_Container
+
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_LEFT_RIGHT()
+
+title AdScale TO-BE C4 Container Diagram
+
+' Users and external systems
+Person(advertiser, "Рекламодатель", "Управляет кампаниями, бюджетами и ставками через личный кабинет")
+Person_Ext(endUser, "Пользователь сайта/приложения", "Просматривает рекламу, кликает по баннерам")
+
+System_Ext(dspPartners, "DSP площадка", "Отправляет bid requests, получает bid responses по OpenRTB")
+System_Ext(paymentGateway, "Платёжный шлюз", "Обработка пополнения рекламных бюджетов")
+
+Container_Ext(apiGateway, "API Gateway", "Kong / Nginx", "Routing, rate limit, auth, circuit breaker")
+Container_Ext(eventBroker, "Event Broker", "Apache Kafka", "Domain events and asynchronous processing")
+
+rectangle "AdScale Platform" as adScale {
+
+    Container(dspGateway, "DSP Integration Service", "Go", "Принимает bid request от DSP. Изолирует особенности разных DSP-площадок от внутреннего устройства AdScale")
+
+    Container(adServing, "Ad Server Service", "Go / C++", "Принимает HTTP-запросы, определяет пользователя, подбирает кандидатов в рекламу")
+    Container(adServingCache, "Ad Server Cache", "Redis Cluster", "Данные по компаний и таргетингу, часто используемые при выборе рекламы")
+
+    Container(auction, "Auction Engine Service", "C++", "Взвешивание ставок, бизнес-правила, расчёт победителя аукциона")
+    Container(auctionCache, "Auction Engine Cache", "Redis Cluster / in-memory", "Данные для RTB hot path")
+
+    Container(creativeDelivery, "Delivery Service", "Go / Node.js", "Формирует HTML/JS-разметку баннера и HTTP response")
+    ContainerDb(creativeStore, "Delivery Storage", "PostgreSQL / Object Storage", "Хранилище данных и файлов для Delivery Service")
+
+    Container(advertiserPortal, "Advertiser Dashboard", "Node.js + JavaScript", "Web UI: управление кампаниями, отчётность")
+
+    Container(campaignManagement, "Campaign Management Service", "Go / Node.js", "Управление компаниями и рекламой")
+    ContainerDb(campaignDb, "Campaign Management DB", "PostgreSQL", "Хранилище данных по компаниям, таргету и рекламе")
+
+    Container(billing, "Financial Service", "Go", "Списание средств, выставление счетов, управление балансами")
+    ContainerDb(billingDb, "Financial Service DB", "PostgreSQL HA", "Хранилище данных по финансовым операциям")
+
+    Container(statistics, "Statistics Service", "Python", "Запись кликов и показов")
+    ContainerDb(statisticsDb, "Statistics DB", "ClickHouse", "Хранилище данных по кликам и показам")
+
+    Container(analytics, "Analytics Service", "Python", "Аналитические SQL-запросы по production-БД")
+    ContainerDb(analyticsDb, "Analytics DB", "ClickHouse", "Хранилище аналитических данных")
+}
+
+' External traffic
+Rel(dspPartners, apiGateway, "Bid requests / responses", "HTTPS / OpenRTB")
+Rel(advertiser, apiGateway, "Управляет кампаниями и бюджетами", "HTTPS")
+Rel(endUser, apiGateway, "Просмотр рекламы и клики", "HTTPS")
+
+Rel(apiGateway, dspGateway, "Маршрутизирует RTB запросы", "OpenRTB")
+Rel(apiGateway, advertiserPortal, "Маршрутизирует запросы рекламодателей", "HTTPS / REST")
+Rel(apiGateway, creativeDelivery, "Маршрутизирует запросы на выдачу рекламы", "HTTPS")
+
+' Синхронный RTB hot path
+Rel(dspGateway, adServing, "Передаёт нормализованный bid request", "gRPC")
+Rel(adServing, adServingCache, "Читает снимки кампаний и таргетингов", "Redis protocol")
+Rel(adServing, auction, "Передаёт кандидатов и контекст запроса", "gRPC")
+Rel(auction, auctionCache, "Читает оперативные снимки аукциона", "Redis protocol / memory")
+Rel(auction, creativeDelivery, "Передаёт победителя", "gRPC")
+Rel(creativeDelivery, creativeStore, "Читает метаданные и файлы", "SQL / S3 API")
+Rel(creativeDelivery, dspGateway, "Возвращает рекламу", "gRPC")
+
+' Управление кампаниями и финансами
+Rel(advertiserPortal, campaignManagement, "Управляет кампаниями и ставками", "REST / gRPC")
+Rel(advertiserPortal, billing, "Управляет бюджетами и платежами", "REST / gRPC")
+Rel(advertiserPortal, analytics, "Запрашивает отчеты", "REST")
+
+Rel(campaignManagement, campaignDb, "Читает и изменяет данные кампаний", "SQL")
+Rel(billing, billingDb, "Выполняет финансовые транзакции", "SQL / ACID")
+Rel(billing, paymentGateway, "Обрабатывает пополнение счёта", "HTTPS / REST")
+
+' Асинхронный поток событий
+Rel(campaignManagement, eventBroker, "Публикует изменения кампаний и ставок", "Kafka producer")
+Rel(eventBroker, adServingCache, "Обновляет слепки таргетов и компаний", "Kafka consumer")
+Rel(eventBroker, auctionCache, "Обновляет ставки", "Kafka consumer")
+
+Rel(adServing, eventBroker, "Публикует события bid request", "Kafka producer")
+Rel(auction, eventBroker, "Публикует события результатов аукциона", "Kafka producer")
+Rel(creativeDelivery, eventBroker, "Публикует события показов и кликов", "Kafka producer")
+Rel(billing, eventBroker, "Публикует финансовые события", "Kafka")
+
+Rel(eventBroker, statistics, "Доставляет рекламные события", "Kafka consumer group")
+Rel(statistics, statisticsDb, "Записывает события", "")
+Rel(statistics, eventBroker, "Публикует статистику", "Kafka producer")
+
+Rel(eventBroker, analytics, "Доставляет бизнес-события", "Kafka consumer group")
+Rel(analytics, analyticsDb, "Формирует и читает аналитические витрины", "")
+
+@enduml
+
