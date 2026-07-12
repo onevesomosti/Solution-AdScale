@@ -1,0 +1,56 @@
+@startuml AdScale_Auction_Engine_Component_C4
+
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+LAYOUT_TOP_DOWN()
+
+title C4 Component Diagram - Auction Engine Service
+
+' External systems and containers
+Container(adServing, "Ad Server Service", "gRPC client", "Передает контекст запроса и ставки")
+Container(campaign, "Campaign Management Service", "Service", "Публикует изменения кампаний")
+Container(billing, "Financial Service", "Service", "Публикует изменения бюджетных лимитов")
+ContainerQueue(kafka, "Apache Kafka", "Event Streaming", "Доменные события и обновления")
+ContainerDb(redis, "Auction Engine Cache", "Redis Cluster", "Ставки, правила, бюджетные лимиты и результаты")
+ContainerDb(auctionDb, "Auction DB", "PostgreSQL", "Данные аукционов")
+
+' Auction Engine components
+Container_Boundary(auctionService, "Auction Engine Service") {
+    Component(api, "gRPC API", "C++ / gRPC", "Принимает RunAuction и возвращает ответ")
+    Component(validator, "Request Validator", "C++", "Проверяет запрос")
+    Component(idempotency, "Idempotency Manager", "C++", "Ищет ранее рассчитанный результат по auction_id")
+    Component(orchestrator, "Auction Orchestrator", "C++", "Координирует прохождение аукциона")
+    Component(candidateFilter, "Bid Filter", "C++", "Исключает недопустимые ставки")
+    Component(bidEvaluator, "Bid Evaluator", "C++", "Рассчитывает итоговые веса ставок")
+    Component(winnerSelector, "Winner Selector", "C++", "Определяет победителя")
+    Component(snapshotProvider, "Runtime Snapshot Provider", "C++", "Предоставляет снимок ставок, правил и лимитов")
+    Component(resilience, "Resilience Policy", "Circuit Breaker / Timeout", "Применяет timeout, bulkhead и fallback")
+    Component(eventPublisher, "Event Publisher", "Kafka producer", "Публикует результаты вне критического пути")
+}
+
+' Main auction flow
+Rel(adServing, api, "RunAuction: контекст и ставки", "gRPC")
+Rel(api, validator, "Передает запрос", "internal")
+Rel(validator, idempotency, "Передает проверенный запрос", "internal")
+Rel(idempotency, orchestrator, "Передает новый запрос или сохраненный результат", "internal")
+Rel(orchestrator, candidateFilter, "Запускает фильтрацию", "internal")
+Rel(candidateFilter, bidEvaluator, "Передает допустимые ставки", "internal")
+Rel(bidEvaluator, snapshotProvider, "Запрашивает ставки, правила и лимиты", "internal")
+Rel(snapshotProvider, redis, "Читает данные", "Redis protocol")
+Rel(snapshotProvider, auctionDb, "Загружает правила вне hot path", "SQL")
+Rel(bidEvaluator, winnerSelector, "Передает рассчитанные веса", "internal")
+Rel(orchestrator, idempotency, "Сохраняет результат", "internal")
+Rel(orchestrator, api, "Возвращает результаты", "internal")
+
+' Resilience
+Rel(api, resilience, "Применяет политики защиты", "internal")
+Rel(resilience, api, "Возвращает быстрый ответ без данных при деградации", "internal")
+
+' Async events and projections
+Rel(orchestrator, eventPublisher, "Передает результат аукциона", "internal")
+Rel(eventPublisher, kafka, "Публикует результат аукциона", "Kafka producer")
+Rel(campaign, kafka, "Публикует изменения компаний и ставок", "Kafka producer")
+Rel(billing, kafka, "Публикует изменения бюджета", "Kafka producer")
+Rel(kafka, snapshotProvider, "Обновляет локальные данные", "Kafka consumer")
+@enduml
